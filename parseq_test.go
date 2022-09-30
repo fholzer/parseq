@@ -1,16 +1,17 @@
-package parseq_test
+package parseq
 
 import (
 	"testing"
 	"time"
 
-	"github.com/MarianoGappa/parseq"
-
 	"math/rand"
 )
 
 func TestOutperformsSequential(t *testing.T) {
-	p := parseq.New(5, processAfter(50*time.Millisecond))
+	p, err := New(5, processAfter(50*time.Millisecond))
+	if err != nil {
+		panic(err)
+	}
 
 	go p.Start()
 	go func() {
@@ -43,7 +44,10 @@ func TestOutperformsSequential(t *testing.T) {
 
 func TestOrderedOutput(t *testing.T) {
 	r := rand.New(rand.NewSource(99))
-	p := parseq.New(5, processAfterRandom(r))
+	p, err := New(5, processAfterRandom(r))
+	if err != nil {
+		panic(err)
+	}
 
 	go p.Start()
 	go func() {
@@ -75,16 +79,22 @@ func TestOrderedOutput(t *testing.T) {
 	p.Close()
 }
 
-func processAfter(d time.Duration) func(interface{}) interface{} {
-	return func(v interface{}) interface{} {
+func processAfter(d time.Duration) processFuncGenerator {
+	return processGenerator(func(v interface{}) interface{} {
 		time.Sleep(d)
 		return v
-	}
+	})
 }
 
-func processAfterRandom(r *rand.Rand) func(interface{}) interface{} {
-	return func(v interface{}) interface{} {
+func processAfterRandom(r *rand.Rand) processFuncGenerator {
+	return processGenerator(func(v interface{}) interface{} {
 		time.Sleep(time.Duration(r.Intn(41)+10) * time.Millisecond) //sleep between 10ms and 50ms
 		return v
+	})
+}
+
+func processGenerator(f func(interface{}) interface{}) processFuncGenerator {
+	return func(i int) (ProcessFunc, error) {
+		return f, nil
 	}
 }

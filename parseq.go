@@ -19,15 +19,26 @@ type ParSeq struct {
 	l           sync.Mutex
 	work        chan input
 	outs        chan output
-	process     func(interface{}) interface{}
+	process     []ProcessFunc
 }
+type ProcessFunc func(interface{}) interface{}
+type processFuncGenerator func(int) (ProcessFunc, error)
 
 // New returns a new ParSeq. Processing doesn't begin until the Start method is called.
 // ParSeq is concurrency-safe; multiple ParSeqs can run in parallel.
 // `parallelism` determines how many goroutines read from the Input channel, and each
 // of the goroutines uses the `process` function to process the inputs.
-func New(parallelism int, process func(interface{}) interface{}) ParSeq {
-	return ParSeq{
+func New(parallelism int, processGenerator processFuncGenerator) (*ParSeq, error) {
+	var err error
+	process := make([]ProcessFunc, parallelism)
+	for i := 0; i < parallelism; i++ {
+		process[i], err = processGenerator(i)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &ParSeq{
 		Input:  make(chan interface{}, parallelism),
 		Output: make(chan interface{}),
 
@@ -35,7 +46,7 @@ func New(parallelism int, process func(interface{}) interface{}) ParSeq {
 		work:        make(chan input, parallelism),
 		outs:        make(chan output, parallelism),
 		process:     process,
-	}
+	}, nil
 }
 
 // Start begins consuming the Input channel and producing to the Output channel.
@@ -48,7 +59,7 @@ func (p *ParSeq) Start() {
 	var wg sync.WaitGroup
 	for i := 0; i < p.parallelism; i++ {
 		wg.Add(1)
-		go p.processRequests(&wg)
+		go p.processRequests(&wg, p.process[i])
 	}
 
 	go func(wg *sync.WaitGroup) {
@@ -76,11 +87,11 @@ func (p *ParSeq) readRequests() {
 	close(p.work)
 }
 
-func (p *ParSeq) processRequests(wg *sync.WaitGroup) {
+func (p *ParSeq) processRequests(wg *sync.WaitGroup, processFunc ProcessFunc) {
 	defer wg.Done()
 
 	for r := range p.work {
-		p.outs <- output{order: r.order, product: p.process(r.request)}
+		p.outs <- output{order: r.order, product: processFunc(r.request)}
 	}
 }
 
