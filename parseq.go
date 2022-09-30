@@ -73,7 +73,6 @@ func (p *ParSeq) Start() {
 // to the Input channel after calling Close().
 func (p *ParSeq) Close() {
 	close(p.Input)
-	<-p.Output
 }
 
 func (p *ParSeq) readRequests() {
