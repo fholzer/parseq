@@ -3,7 +3,9 @@
 // that respects the order of input.
 package parseq
 
-import "sync"
+import (
+	"sync"
+)
 
 type ParSeq struct {
 	// Input is the channel the client code should send to.
@@ -14,11 +16,8 @@ type ParSeq struct {
 	Output chan interface{}
 
 	parallelism int
-	order       int64
-	unresolved  []int64
-	l           sync.Mutex
-	work        chan input
-	outs        chan output
+	work        []chan interface{}
+	outs        []chan interface{}
 	process     []ProcessFunc
 }
 type ProcessFunc func(interface{}) interface{}
@@ -38,13 +37,20 @@ func New(parallelism int, processGenerator processFuncGenerator) (*ParSeq, error
 		}
 	}
 
+	work := make([]chan interface{}, parallelism)
+	outs := make([]chan interface{}, parallelism)
+	for i := 0; i < parallelism; i++ {
+		work[i] = make(chan interface{}, parallelism)
+		outs[i] = make(chan interface{}, parallelism)
+	}
+
 	return &ParSeq{
 		Input:  make(chan interface{}, parallelism),
-		Output: make(chan interface{}),
+		Output: make(chan interface{}, parallelism),
 
 		parallelism: parallelism,
-		work:        make(chan input, parallelism),
-		outs:        make(chan output, parallelism),
+		work:        work,
+		outs:        outs,
 		process:     process,
 	}, nil
 }
@@ -59,12 +65,14 @@ func (p *ParSeq) Start() {
 	var wg sync.WaitGroup
 	for i := 0; i < p.parallelism; i++ {
 		wg.Add(1)
-		go p.processRequests(&wg, p.process[i])
+		go p.processRequests(&wg, p.work[i], p.outs[i], p.process[i])
 	}
 
 	go func(wg *sync.WaitGroup) {
 		wg.Wait()
-		close(p.outs)
+		for _, o := range p.outs {
+			close(o)
+		}
 	}(&wg)
 }
 
@@ -76,50 +84,36 @@ func (p *ParSeq) Close() {
 }
 
 func (p *ParSeq) readRequests() {
+	i := 0
 	for r := range p.Input {
-		p.order++
-		p.l.Lock()
-		p.unresolved = append(p.unresolved, p.order)
-		p.l.Unlock()
-		p.work <- input{order: p.order, request: r}
+		p.work[i%p.parallelism] <- r
+		i++
+		if i >= p.parallelism {
+			i = 0
+		}
 	}
-	close(p.work)
+	for _, w := range p.work {
+		close(w)
+	}
 }
 
-func (p *ParSeq) processRequests(wg *sync.WaitGroup, processFunc ProcessFunc) {
+func (p *ParSeq) processRequests(wg *sync.WaitGroup, in chan interface{}, out chan interface{}, processFunc ProcessFunc) {
 	defer wg.Done()
 
-	for r := range p.work {
-		p.outs <- output{order: r.order, product: processFunc(r.request)}
+	for r := range in {
+		out <- processFunc(r)
 	}
 }
 
 func (p *ParSeq) orderResults() {
-	rtBuf := make(map[int64]interface{})
-	for pr := range p.outs {
-		rtBuf[pr.order] = pr.product
-	loop:
-		if len(p.unresolved) > 0 {
-			u := p.unresolved[0]
-			if rtBuf[u] != nil {
-				p.l.Lock()
-				p.unresolved = p.unresolved[1:]
-				p.l.Unlock()
-				p.Output <- rtBuf[u]
-				delete(rtBuf, u)
-				goto loop
+	for {
+		for i := 0; i < p.parallelism; i++ {
+			val, ok := <-p.outs[i]
+			if !ok {
+				close(p.Output)
+				return
 			}
+			p.Output <- val
 		}
 	}
-	close(p.Output)
-}
-
-type input struct {
-	request interface{}
-	order   int64
-}
-
-type output struct {
-	product interface{}
-	order   int64
 }
