@@ -1,6 +1,7 @@
 package parseq
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -87,8 +88,12 @@ func processAfter(d time.Duration) processFuncGenerator {
 }
 
 func processAfterRandom(r *rand.Rand) processFuncGenerator {
+	var mu sync.Mutex
 	return processGenerator(func(v interface{}) interface{} {
-		time.Sleep(time.Duration(r.Intn(41)+10) * time.Millisecond) //sleep between 10ms and 50ms
+		mu.Lock()
+		rnd := r.Intn(41)
+		mu.Unlock()
+		time.Sleep(time.Duration(rnd+10) * time.Millisecond) //sleep between 10ms and 50ms
 		return v
 	})
 }
