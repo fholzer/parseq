@@ -20,6 +20,7 @@ type ParSeq struct {
 	work        chan input
 	outs        chan output
 	process     []ProcessFunc
+	wg          sync.WaitGroup
 }
 type ProcessFunc func(interface{}) interface{}
 type processFuncGenerator func(int) (ProcessFunc, error)
@@ -56,16 +57,15 @@ func (p *ParSeq) Start() {
 	go p.readRequests()
 	go p.orderResults()
 
-	var wg sync.WaitGroup
 	for i := 0; i < p.parallelism; i++ {
-		wg.Add(1)
-		go p.processRequests(&wg, p.process[i])
+		p.wg.Add(1)
+		go p.processRequests(p.process[i])
 	}
 
-	go func(wg *sync.WaitGroup) {
-		wg.Wait()
+	go func() {
+		p.wg.Wait()
 		close(p.outs)
-	}(&wg)
+	}()
 }
 
 // Close waits for all queued messages to process, and stops the ParSeq.
@@ -73,6 +73,7 @@ func (p *ParSeq) Start() {
 // to the Input channel after calling Close().
 func (p *ParSeq) Close() {
 	close(p.Input)
+	p.wg.Wait()
 }
 
 func (p *ParSeq) readRequests() {
@@ -86,8 +87,8 @@ func (p *ParSeq) readRequests() {
 	close(p.work)
 }
 
-func (p *ParSeq) processRequests(wg *sync.WaitGroup, processFunc ProcessFunc) {
-	defer wg.Done()
+func (p *ParSeq) processRequests(processFunc ProcessFunc) {
+	defer p.wg.Done()
 
 	for r := range p.work {
 		p.outs <- output{order: r.order, product: processFunc(r.request)}
