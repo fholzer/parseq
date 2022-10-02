@@ -3,7 +3,10 @@
 // that respects the order of input.
 package parseq
 
-import "sync"
+import (
+	"fmt"
+	"sync"
+)
 
 type ParSeq struct {
 	// Input is the channel the client code should send to.
@@ -14,11 +17,8 @@ type ParSeq struct {
 	Output chan interface{}
 
 	parallelism int
-	order       int64
-	unresolved  []int64
-	l           sync.Mutex
-	work        chan input
-	outs        chan output
+	work        []chan *workPackage
+	outChan     chan *workPackage
 	process     []ProcessFunc
 }
 type ProcessFunc func(interface{}) interface{}
@@ -32,19 +32,25 @@ func New(parallelism int, processGenerator processFuncGenerator) (*ParSeq, error
 	var err error
 	process := make([]ProcessFunc, parallelism)
 	for i := 0; i < parallelism; i++ {
-		process[i], err = processGenerator(i)
+		process[i], err = processGenerator(int(i))
 		if err != nil {
 			return nil, err
 		}
 	}
 
+	work := make([]chan *workPackage, parallelism)  // must have size equal to parallelism
+	outChan := make(chan *workPackage, parallelism) // must have buffer size equal to parallelism
+	for i := 0; i < parallelism; i++ {
+		work[i] = make(chan *workPackage) // must be unbuffered
+	}
+
 	return &ParSeq{
 		Input:  make(chan interface{}, parallelism),
-		Output: make(chan interface{}),
+		Output: make(chan interface{}, parallelism),
 
 		parallelism: parallelism,
-		work:        make(chan input, parallelism),
-		outs:        make(chan output, parallelism),
+		work:        work,
+		outChan:     outChan,
 		process:     process,
 	}, nil
 }
@@ -59,12 +65,12 @@ func (p *ParSeq) Start() {
 	var wg sync.WaitGroup
 	for i := 0; i < p.parallelism; i++ {
 		wg.Add(1)
-		go p.processRequests(&wg, p.process[i])
+		go p.processRequests(&wg, p.work[i], p.outChan, p.process[i])
 	}
 
 	go func(wg *sync.WaitGroup) {
 		wg.Wait()
-		close(p.outs)
+		close(p.outChan)
 	}(&wg)
 }
 
@@ -75,51 +81,111 @@ func (p *ParSeq) Close() {
 	close(p.Input)
 }
 
-func (p *ParSeq) readRequests() {
-	for r := range p.Input {
-		p.order++
-		p.l.Lock()
-		p.unresolved = append(p.unresolved, p.order)
-		p.l.Unlock()
-		p.work <- input{order: p.order, request: r}
-	}
-	close(p.work)
+type workPackage struct {
+	data  interface{}
+	order int64
 }
 
-func (p *ParSeq) processRequests(wg *sync.WaitGroup, processFunc ProcessFunc) {
+func (p *ParSeq) readRequests() {
+	i := 0
+	par := p.parallelism
+	order := int64(0)
+	for r := range p.Input {
+		p.work[i%par] <- &workPackage{
+			data:  r,
+			order: order,
+		}
+		i++
+		order++
+		if i >= par {
+			i = 0
+		}
+	}
+	for _, w := range p.work {
+		close(w)
+	}
+}
+
+func (p *ParSeq) processRequests(wg *sync.WaitGroup, in chan *workPackage, out chan *workPackage, processFunc ProcessFunc) {
 	defer wg.Done()
 
-	for r := range p.work {
-		p.outs <- output{order: r.order, product: processFunc(r.request)}
+	for r := range in {
+		r.data = processFunc(r.data)
+		if r.data == nil {
+			fmt.Println("processFun returned nil value")
+		}
+		out <- r
 	}
 }
 
+const debug bool = false
+
 func (p *ParSeq) orderResults() {
-	rtBuf := make(map[int64]interface{})
-	for pr := range p.outs {
-		rtBuf[pr.order] = pr.product
-	loop:
-		if len(p.unresolved) > 0 {
-			u := p.unresolved[0]
-			if rtBuf[u] != nil {
-				p.l.Lock()
-				p.unresolved = p.unresolved[1:]
-				p.l.Unlock()
-				p.Output <- rtBuf[u]
-				delete(rtBuf, u)
-				goto loop
+	parallelism := p.parallelism
+	if debug {
+		fmt.Printf("[%p] parallelism: %d\n", p, parallelism)
+	}
+	sliceLimit := 2 * parallelism
+	sliceLimit64 := int64(sliceLimit)
+	outSlice := make([]*workPackage, sliceLimit) // must have size equal to parallelism
+	sent := int64(0)
+	got := int64(0)
+	nextOffset := 0
+	for val := range p.outChan {
+		// store
+		slot := val.order % sliceLimit64
+		if debug {
+			fmt.Printf("[%p] setting result #%d in slot %d\n", p, val.order, slot)
+		}
+		outSlice[slot] = val
+		got++
+
+		// retry:
+		w := outSlice[nextOffset]
+		if w != nil && w.order == sent {
+			if debug {
+				fmt.Printf("[%p] getting result #%d from slot %d\n", p, w.order, nextOffset)
+			}
+			p.Output <- w.data
+			sent++
+			nextOffset++
+			if nextOffset >= sliceLimit {
+				if debug {
+					fmt.Printf("[%p] resetting `nextOffset` to 0\n", p)
+				}
+				nextOffset = 0
 			}
 		}
 	}
+
+	if debug {
+		fmt.Printf("[%p] got %d, sent %d\n", p, got, sent)
+	}
+
+	// send remaining values
+	for i := sent; i < got; i++ {
+		if debug {
+			fmt.Printf("[%p] sending remaining %d\n", p, got-sent)
+		}
+
+		w := outSlice[nextOffset]
+		if w != nil && w.order == sent {
+			if debug {
+				fmt.Printf("[%p] getting result #%d from slot %d\n", p, w.order, nextOffset)
+			}
+			p.Output <- w.data
+			sent++
+			nextOffset++
+			if nextOffset >= sliceLimit {
+				if debug {
+					fmt.Printf("[%p] resetting `nextOffset` to 0\n", p)
+				}
+				nextOffset = 0
+			}
+		} else {
+			panic(fmt.Sprintf("[%p] trying to send remaining %d values, but found nil or wrong order for result %d in slot %d: %+v\nslice: %+v", p, got-sent, i, nextOffset, w, outSlice))
+		}
+	}
+
 	close(p.Output)
-}
-
-type input struct {
-	request interface{}
-	order   int64
-}
-
-type output struct {
-	product interface{}
-	order   int64
 }

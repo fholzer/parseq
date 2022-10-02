@@ -1,6 +1,7 @@
 package parseq
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -44,7 +45,7 @@ func TestOutperformsSequential(t *testing.T) {
 
 func TestOrderedOutput(t *testing.T) {
 	r := rand.New(rand.NewSource(99))
-	p, err := New(5, processAfterRandom(r))
+	p, err := New(2, processAfterRandom(r))
 	if err != nil {
 		panic(err)
 	}
@@ -79,6 +80,38 @@ func TestOrderedOutput(t *testing.T) {
 	}
 }
 
+func TestReversedProcessingOutput(t *testing.T) {
+	par := 2
+	p, err := New(par, processReversed(par, 5))
+	if err != nil {
+		panic(err)
+	}
+
+	go p.Start()
+	go func() {
+		p.Input <- 666
+		p.Input <- 667
+		p.Input <- 668
+		p.Input <- 669
+		p.Input <- 670
+		p.Close()
+	}()
+
+	a := <-p.Output
+	b := <-p.Output
+	c := <-p.Output
+	d := <-p.Output
+	e := <-p.Output
+
+	if a.(int) != 666 ||
+		b.(int) != 667 ||
+		c.(int) != 668 ||
+		d.(int) != 669 ||
+		e.(int) != 670 {
+		t.Error("output came out out of order: ", a, b, c, d, e)
+	}
+}
+
 func processAfter(d time.Duration) processFuncGenerator {
 	return processGenerator(func(v interface{}) interface{} {
 		time.Sleep(d)
@@ -87,8 +120,20 @@ func processAfter(d time.Duration) processFuncGenerator {
 }
 
 func processAfterRandom(r *rand.Rand) processFuncGenerator {
+	var mu sync.Mutex
 	return processGenerator(func(v interface{}) interface{} {
-		time.Sleep(time.Duration(r.Intn(41)+10) * time.Millisecond) //sleep between 10ms and 50ms
+		mu.Lock()
+		rnd := r.Intn(41)
+		mu.Unlock()
+		time.Sleep(time.Duration(rnd+10) * time.Millisecond) //sleep between 10ms and 50ms
+		return v
+	})
+}
+
+func processReversed(n, delayStep int) processFuncGenerator {
+	procCounter := 0
+	return processGenerator(func(v interface{}) interface{} {
+		time.Sleep(time.Duration((n-procCounter)*delayStep) * time.Millisecond)
 		return v
 	})
 }
