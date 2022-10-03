@@ -8,7 +8,9 @@ import (
 )
 
 func TestOutperformsSequential(t *testing.T) {
-	p, err := New(5, processAfter(50*time.Millisecond))
+	p, err := NewWithProcessor[int, int](5, &ConstantDelayProcessor{
+		delay: 50 * time.Millisecond,
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -32,7 +34,7 @@ func TestOutperformsSequential(t *testing.T) {
 	<-p.Output // min(elapsed)=70ms
 	<-p.Output // min(elapsed)=80ms
 	<-p.Output // min(elapsed)=90ms
-	elapsed := time.Now().Sub(start)
+	elapsed := time.Since(start)
 
 	if elapsed > 150*time.Millisecond { // 150ms for
 		t.Error("test took too long; parallel strategy is ineffective!")
@@ -44,7 +46,9 @@ func TestOutperformsSequential(t *testing.T) {
 
 func TestOrderedOutput(t *testing.T) {
 	r := rand.New(rand.NewSource(99))
-	p, err := New(5, processAfterRandom(r))
+	p, err := NewWithProcessor[int, int](5, &RandomDelayProcessor{
+		r: r,
+	})
 	if err != nil {
 		panic(err)
 	}
@@ -70,31 +74,29 @@ func TestOrderedOutput(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	e := <-p.Output
 
-	if a.(int) != 666 ||
-		b.(int) != 667 ||
-		c.(int) != 668 ||
-		d.(int) != 669 ||
-		e.(int) != 670 {
+	if a != 666 ||
+		b != 667 ||
+		c != 668 ||
+		d != 669 ||
+		e != 670 {
 		t.Error("output came out out of order: ", a, b, c, d, e)
 	}
 }
 
-func processAfter(d time.Duration) processFuncGenerator {
-	return processGenerator(func(v interface{}) interface{} {
-		time.Sleep(d)
-		return v
-	})
+type ConstantDelayProcessor struct {
+	delay time.Duration
 }
 
-func processAfterRandom(r *rand.Rand) processFuncGenerator {
-	return processGenerator(func(v interface{}) interface{} {
-		time.Sleep(time.Duration(r.Intn(41)+10) * time.Millisecond) //sleep between 10ms and 50ms
-		return v
-	})
+func (p *ConstantDelayProcessor) Process(i int) int {
+	time.Sleep(time.Duration(p.delay))
+	return i
 }
 
-func processGenerator(f func(interface{}) interface{}) processFuncGenerator {
-	return func(i int) (ProcessFunc, error) {
-		return f, nil
-	}
+type RandomDelayProcessor struct {
+	r *rand.Rand
+}
+
+func (p *RandomDelayProcessor) Process(i int) int {
+	time.Sleep(time.Duration(p.r.Intn(41)+10) * time.Millisecond) //sleep between
+	return i
 }
